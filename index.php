@@ -111,6 +111,37 @@ body.tv.tv-dense .overview-grid{display:none}body.tv.tv-dense .kpis{grid-templat
   .desktop-only{display:none!important}
 }
 
+/* Mobiele header: titel boven compacte beheersknoppen. TV fullscreen blijft alleen op grotere schermen zichtbaar. */
+@media(max-width:680px){
+  header{
+    flex-direction:column;
+    align-items:flex-start;
+    justify-content:flex-start;
+    gap:9px;
+    padding:11px 14px;
+  }
+  header>div:first-child{width:100%}
+  .brand{font-size:19px;line-height:1.15}
+  .buttons{
+    width:100%;
+    display:flex;
+    justify-content:flex-start;
+    align-items:center;
+    gap:5px;
+    flex-wrap:wrap;
+  }
+  .buttons button,.buttons .btn{
+    width:auto;
+    min-width:0;
+    padding:6px 8px;
+    border-radius:7px;
+    font-size:11px;
+    line-height:1.1;
+  }
+  .buttons .hide-mobile{display:none!important}
+  .toolbar{position:static!important;top:auto!important}
+}
+
 </style></head><body>
 <header><div><div class="brand">Stein Invest Dashboard</div><div class="sub">ING + Saxo · portfolio in EUR</div></div><div class="buttons">
 <button class="hide-mobile" onclick="toggleTV()">TV fullscreen</button>
@@ -268,7 +299,6 @@ async function loadDashboard(){
 function renderFromCache(){
  const d=lastDashboardData; if(!d)return;
  let ps=(d.positions||[]).map(x=>({...x}));
- // Eerst metrics berekenen zodat sorteren op gewicht/winst mogelijk is.
  let provisionalTotal=0;
  ps.forEach(x=>{x._price=Number(x.quote?.price_eur??0);x._value=x._price*Number(x.qty);provisionalTotal+=x._value});
  ps.forEach(x=>{
@@ -292,9 +322,6 @@ function renderFromCache(){
    const q=x.quote||{}, price=x._price, value=x._value, c=x._cost, pl=x._pnl, plp=x._pnlPct;
    const prevPrice=Number(q.previous_close_eur||0);
    const qty=Number(x.qty||0);
-
-   // Dagresultaat telt alleen voor posities die al vóór vandaag in portefeuille zaten.
-   // Nieuwe posities van vandaag krijgen bewust dagresultaat 0.
    const todayLocal=new Date();
    const yyyy=todayLocal.getFullYear(), mm=String(todayLocal.getMonth()+1).padStart(2,'0'), dd=String(todayLocal.getDate()).padStart(2,'0');
    const todayStr=`${yyyy}-${mm}-${dd}`;
@@ -304,9 +331,7 @@ function renderFromCache(){
 
    let eligibleQty=0;
    if(hasOlderPosition){
-     // Alleen aandelen die vóór vandaag werden aangekocht tellen mee.
      eligibleQty=olderPurchases.reduce((sum,b)=>sum+Number(b.qty||0),0);
-     // Nooit meer dan het huidige aantal laten meetellen.
      eligibleQty=Math.min(qty,Math.max(0,eligibleQty));
    }
 
@@ -344,7 +369,6 @@ function applyColumnCount(){
  document.documentElement.style.setProperty('--cols',String(Math.max(3,Math.min(6,n))));
 }
 
-
 async function loadSectors(){
   try{
     const r=await fetch('api.php?action=sectors',{credentials:'same-origin'}),d=await r.json();
@@ -376,7 +400,6 @@ async function suggestSector(){
     const r=await fetch('api.php?action=sector_suggest&ticker='+encodeURIComponent(ticker.value)+'&name='+encodeURIComponent(assetName.value),{credentials:'same-origin'}),d=await r.json();
     if(!d.ok)return;
     await loadSectors();
-    // Als de aanbevolen gespecialiseerde sector nog niet bestaat, voeg hem voor admins automatisch toe.
     if(IS_ADMIN && ['AI','Halfgeleiders'].includes(d.sector)){
       const fd=new FormData();fd.append('csrf',csrf);fd.append('name',d.sector);
       await fetch('api.php?action=add_sector',{method:'POST',body:fd,credentials:'same-origin'});
@@ -493,7 +516,6 @@ async function savePosition(){
   await openPositions();
 }
 
-
 async function openUsers(){
   if(!IS_ADMIN)return;
   const r=await fetch('api.php?action=users',{credentials:'same-origin'});const d=await r.json();
@@ -537,14 +559,11 @@ function applyTVLayout(){
   if(!document.body.classList.contains('tv'))return;
   const n=(lastDashboardData?.positions||[]).length||1;
   const w=window.innerWidth||1920, h=window.innerHeight||1080;
-  // Reserve top area for KPI + sector chart. Choose grid by aspect ratio and card count.
   const usableH=Math.max(300,h-300);
-  const aspect=w/usableH;
   let best={cols:n,rows:1,score:-Infinity};
   for(let cols=1;cols<=Math.min(8,n);cols++){
     const rows=Math.ceil(n/cols);
     const cardW=w/cols, cardH=usableH/rows;
-    // Favor readable card ratio around 1.35 and sufficient height.
     const ratio=cardW/Math.max(cardH,1);
     const score=-Math.abs(ratio-1.35)*2 + Math.min(cardW/260,1) + Math.min(cardH/180,1);
     if(score>best.score)best={cols,rows,score};
