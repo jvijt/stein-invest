@@ -55,7 +55,6 @@ function verify_csrf(): void {
     }
 }
 
-
 function current_user(): ?array {
     start_session();
     if (empty($_SESSION['user_id'])) return null;
@@ -173,8 +172,29 @@ function parse_chart(string $symbol, string $range='1mo', string $interval='1d')
         $v = $closes[$i] ?? null;
         if ($v !== null) $points[] = ['t'=>(int)$ts,'v'=>(float)$v];
     }
+
     $last = $meta['regularMarketPrice'] ?? ($points ? end($points)['v'] : null);
-    $prev = $meta['chartPreviousClose'] ?? $meta['previousClose'] ?? null;
+
+    // chartPreviousClose is the close BEFORE the requested chart range (e.g. ~1 month ago for range=1mo),
+    // not necessarily yesterday's close. Derive the real previous trading-day close from the daily points.
+    $prev = null;
+    if ($points) {
+        $tzName = $meta['exchangeTimezoneName'] ?? 'UTC';
+        try { $tz = new DateTimeZone($tzName); } catch (Throwable $e) { $tz = new DateTimeZone('UTC'); }
+        $today = (new DateTime('now', $tz))->format('Y-m-d');
+        $lastPoint = $points[count($points)-1];
+        $lastPointDate = (new DateTime('@'.$lastPoint['t']))->setTimezone($tz)->format('Y-m-d');
+
+        if ($lastPointDate === $today && count($points) >= 2) {
+            // Today's daily candle may be in progress: previous close is the candle before today.
+            $prev = $points[count($points)-2]['v'];
+        } else {
+            // Before today's session starts (or on a non-trading day), latest completed candle is previous close.
+            $prev = $lastPoint['v'];
+        }
+    }
+    if ($prev === null) $prev = $meta['previousClose'] ?? $meta['chartPreviousClose'] ?? null;
+
     return [
         'symbol'=>$symbol,
         'price'=>$last !== null ? (float)$last : null,
@@ -193,7 +213,7 @@ function parse_chart(string $symbol, string $range='1mo', string $interval='1d')
 function fx_to_eur(string $currency): float {
     $currency = strtoupper($currency);
     if ($currency === 'EUR' || $currency === '') return 1.0;
-    $pair = 'EUR' . $currency . '=X'; // e.g. EURUSD=X = USD per EUR
+    $pair = 'EUR' . $currency . '=X';
     $d = parse_chart($pair, '5d', '1d');
     $p = $d['price'] ?? null;
     return $p ? 1.0 / (float)$p : 1.0;
@@ -220,7 +240,6 @@ function historical_fx_to_eur(string $currency, string $date): float {
     }
     return $best ? 1.0/$best : fx_to_eur($currency);
 }
-
 
 function yahoo_search(string $query, int $count=10): array {
     $query = trim($query);
@@ -253,55 +272,30 @@ function supported_currencies(): array {
     return ['EUR','USD','GBP','CHF','SEK','NOK','DKK','JPY','CAD','AUD','PLN','CZK','HUF'];
 }
 
-
 function exchange_is_open(array $d, array $asset): bool {
     $now = time();
-
-    // 1) Beste bron: concrete start/eindtijd van de huidige handelsdag van Yahoo.
     $start = isset($d['regular_start']) ? (int)$d['regular_start'] : 0;
     $end   = isset($d['regular_end']) ? (int)$d['regular_end'] : 0;
-    if ($start > 0 && $end > $start) {
-        return $now >= $start && $now < $end;
-    }
+    if ($start > 0 && $end > $start) return $now >= $start && $now < $end;
 
-    // 2) Fallback op beurs/ticker wanneer marketState ontbreekt of onbetrouwbaar is.
     $ticker = strtoupper((string)($asset['ticker'] ?? ''));
     $exchange = strtoupper((string)($d['exchange'] ?? ($asset['exchange_name'] ?? '')));
     $tzName = $d['timezone'] ?? null;
-
     try {
-        if ($tzName) {
-            $tz = new DateTimeZone($tzName);
-        } elseif (str_ends_with($ticker,'.BR') || str_contains($exchange,'BRUSSEL')) {
-            $tz = new DateTimeZone('Europe/Brussels');
-        } elseif (str_ends_with($ticker,'.AS') || str_contains($exchange,'AMSTERDAM')) {
-            $tz = new DateTimeZone('Europe/Amsterdam');
-        } elseif (str_ends_with($ticker,'.DE') || str_contains($exchange,'XETRA')) {
-            $tz = new DateTimeZone('Europe/Berlin');
-        } elseif (in_array($exchange,['NMS','NGM','NCM','NASDAQ'],true) || !str_contains($ticker,'.')) {
-            $tz = new DateTimeZone('America/New_York');
-        } else {
-            return strtoupper((string)($d['market_state'] ?? '')) === 'REGULAR';
-        }
+        if ($tzName) $tz = new DateTimeZone($tzName);
+        elseif (str_ends_with($ticker,'.BR') || str_contains($exchange,'BRUSSEL')) $tz = new DateTimeZone('Europe/Brussels');
+        elseif (str_ends_with($ticker,'.AS') || str_contains($exchange,'AMSTERDAM')) $tz = new DateTimeZone('Europe/Amsterdam');
+        elseif (str_ends_with($ticker,'.DE') || str_contains($exchange,'XETRA')) $tz = new DateTimeZone('Europe/Berlin');
+        elseif (in_array($exchange,['NMS','NGM','NCM','NASDAQ'],true) || !str_contains($ticker,'.')) $tz = new DateTimeZone('America/New_York');
+        else return strtoupper((string)($d['market_state'] ?? '')) === 'REGULAR';
 
         $dt = new DateTime('now',$tz);
         $dow = (int)$dt->format('N');
         if ($dow >= 6) return false;
-
         $hm = ((int)$dt->format('H'))*60 + (int)$dt->format('i');
-
-        // Euronext Brussels/Amsterdam en Xetra normale sessie.
-        if (str_ends_with($ticker,'.BR') || str_ends_with($ticker,'.AS') || str_ends_with($ticker,'.DE')
-            || str_contains($exchange,'BRUSSEL') || str_contains($exchange,'AMSTERDAM') || str_contains($exchange,'XETRA')) {
-            return $hm >= (9*60) && $hm < (17*60+30);
-        }
-
-        // Nasdaq/NYSE normale sessie: 09:30-16:00 lokale tijd.
-        if (in_array($exchange,['NMS','NGM','NCM','NASDAQ','NYQ','NYSE'],true) || !str_contains($ticker,'.')) {
-            return $hm >= (9*60+30) && $hm < (16*60);
-        }
+        if (str_ends_with($ticker,'.BR') || str_ends_with($ticker,'.AS') || str_ends_with($ticker,'.DE') || str_contains($exchange,'BRUSSEL') || str_contains($exchange,'AMSTERDAM') || str_contains($exchange,'XETRA')) return $hm >= 540 && $hm < 1050;
+        if (in_array($exchange,['NMS','NGM','NCM','NASDAQ','NYQ','NYSE'],true) || !str_contains($ticker,'.')) return $hm >= 570 && $hm < 960;
     } catch(Throwable $e) {}
-
     return strtoupper((string)($d['market_state'] ?? '')) === 'REGULAR';
 }
 
